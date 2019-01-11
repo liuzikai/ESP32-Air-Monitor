@@ -19,11 +19,14 @@ private:
     static constexpr int uart_port = 1;
     static constexpr int8_t rx_pin = 9;
     static constexpr int8_t tx_pin = 10;
+    static constexpr int8_t set_pin = 5;
 
     static uint16_t input_checksum;
 
     inline static uint8_t read_uint8(void);
     inline static uint16_t read_uint16(void);
+
+    static bool _enabled;
 
 public:
     
@@ -49,6 +52,11 @@ public:
 
     //Require call interval from 200 to 800 ms
     static bool update(void);
+
+    static void set_enabled(bool enabled);
+    static bool is_enabled() {
+        return _enabled;
+    }
 };
 
 #endif // DSP_MONITOR_PMS7003_H_

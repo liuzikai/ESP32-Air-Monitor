@@ -26,6 +26,8 @@ uint16_t PMS7003::pm10_0_raw;
 uint8_t  PMS7003::version;
 uint8_t  PMS7003::errorCode;
 
+bool PMS7003::_enabled = false;
+
 // Wait until the information is fully received
 bool PMS7003::data_available(void) {
     return (pmsSerial.available() >= 32);
@@ -48,6 +50,12 @@ inline uint16_t PMS7003::read_uint16(void) {
 
 void PMS7003::begin(void) {
     pmsSerial.begin(9600, SERIAL_8N1, rx_pin, tx_pin);
+    pinMode(set_pin, OUTPUT);
+    set_enabled(false);
+}
+
+void PMS7003::set_enabled(bool enabled) {
+    digitalWrite(set_pin, enabled);
 }
 
 bool PMS7003::update(void) {

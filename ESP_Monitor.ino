@@ -4,15 +4,24 @@
  * @default 0
  * @note if the dev board is not connect to PC, this may cause block in serial print.
  */
-#define DEBUG_ENABLE_SERIAL 0
+#define DEBUG_ENABLE_SERIAL 1
 
 /**
  * DEBUG_LOCAL_WORK
  * @breif disable WiFi connection functions and upload task
  * @default 0
  * @note only for debug. Make sure serial is enabled in the debug mode, or you will have no way to get message.
+ *       And there is no sensor sleep control!
  */
 #define DEBUG_LOCAL_WORK 0
+
+#define WIFI_RETRY_INTERVAL 5000 // ms
+#define UPLOAD_INTERVAL 20000 // ms
+#define UPLOAD_RETRY_INTERVAL 2000 // ms
+#define PMS7003_PRE_START_TIME 5000 //ms
+#define DHT22_PRE_START_TIME 10000 //ms
+#define DHT22_INTERVAL 2000 //ms
+#define DHT22_RETRY_INTERVAL 1000 //ms
 
 #include "Config.h"
 
@@ -43,7 +52,7 @@ void connect_and_login() {
 #if DEBUG_ENABLE_SERIAL
         Serial.print(".");
 #endif
-        delay(5000);     
+        delay(WIFI_RETRY_INTERVAL);     
     } 
 
 #if DEBUG_ENABLE_SERIAL
@@ -77,52 +86,55 @@ void connect_and_login() {
 
 #endif
 
-static struct pt ptUpdatePMS7003;
-static struct pt ptUpdateSensors;
+static struct pt ptPMS7003Interupt;
+static struct pt ptUpdateDHT22;
 static struct pt ptUploadData;
 
+static unsigned long  dht22_next_sample_time = DHT22_INTERVAL;
+
 /**
- * The pt to retrieve data from PMS7003 sensor.
- * PMS7003 is control individually to receive data in time and avoid checksum error
+ * Thread to retrieve data from PMS7003 sensor.
+ * PMS7003 is control individually to receive data in time and avoid checksum error. 
+ * Whenever there is available message, the program will retrieve and process it.
+ * There is no sample time control for PMS7003. Use PMS7003::set_enable() to control the sensor directly.
  */
-static int thdUpdatePMS7003(struct pt *pt) {
+static int thdPMS7003Interupt(struct pt *pt) {
     PT_BEGIN(pt);
     while(1) {
-        // Wait until the information is fully received
+        // Wait until the information is fully received, which is the only condition.
         PT_WAIT_UNTIL(pt, PMS7003::data_available());
         PMS7003::update();
+#if DEBUG_ENABLE_SERIAL
+            Serial.printf("PMS7003: PM1.0: %u, PM2.5: %u, PM10: %u", PMS7003::pm1_0_amb, PMS7003::pm2_5_amb, PMS7003::pm10_0_amb);
+            Serial.println("");
+#endif
     }
     PT_END(pt);
 }
 
 /**
- * The pt to update other sensors.
+ * Thread to update other DHT22.
+ * Control by dht22_next_sample_time. This thread can set it for repeating sampling, 
+ * and thdUploadData can also extend the interval by setting it to next_upload_time - DHT22_PRE_START_TIME
  */
-static int thdUpdateSensors(struct pt *pt) {
-    static unsigned long last_sample_time = 0;
-    static unsigned long next_sample_interval = 5000;
-
+static int thdUpdateDHT22(struct pt *pt) {
     PT_BEGIN(pt);
     while(1) {
-        
-        // Sample each 5s
-        PT_WAIT_UNTIL(pt, (millis() > last_sample_time + next_sample_interval));
-        last_sample_time = millis();
+        // Wait until next sample time is reached
+        PT_WAIT_UNTIL(pt, (millis() > dht22_next_sample_time));
 
         if (DHT22_Sensor::update()) {
 #if DEBUG_ENABLE_SERIAL
             Serial.printf("DHT22: temperature: %f, humidity: %f", DHT22_Sensor::temperature, DHT22_Sensor::humidity);
             Serial.println("");
 #endif
-            next_sample_interval = 5000;  // success, perform next sample after 20s
+            dht22_next_sample_time = millis() + DHT22_INTERVAL;  // success, perform next sample after DHT22_INTERVAL
         } else {
             #if DEBUG_ENABLE_SERIAL
             Serial.println("DHT22 sample failed");
 #endif
-            next_sample_interval = 1000;  // failed, retry after 1s
+            dht22_next_sample_time = millis() + DHT22_RETRY_INTERVAL;  // failed, retry after 1s
         }
-
-
 
     }
     PT_END(pt);
@@ -130,18 +142,26 @@ static int thdUpdateSensors(struct pt *pt) {
 
 #if !DEBUG_LOCAL_WORK
 /**
- * The pt to upload data to ThingSpeak
+ * Thread to upload data to ThingSpeak
  */
 static int thdUploadData(struct pt *pt) {
-    static unsigned long last_update_time = 0;
-    static unsigned long next_update_interval = 20000;
+    static unsigned long next_upload_time = UPLOAD_INTERVAL;
     PT_BEGIN(pt);
     while(1) {
 
-        // Wait for 20s
-        PT_WAIT_UNTIL(pt, millis() > last_update_time + next_update_interval);
-        last_update_time = millis();
-        
+        if (!PMS7003::is_enabled()) {
+            // If PMS7003 is not enabled, enable it ahead
+            PT_WAIT_UNTIL(pt, millis() > next_upload_time - PMS7003_PRE_START_TIME);
+            PMS7003::set_enabled(true);
+#if DEBUG_ENABLE_SERIAL
+            Serial.println("PMS7003 enabled.");
+#endif
+            // Continue to wait for real upload time
+        }
+
+        // Wait for next update time
+        PT_WAIT_UNTIL(pt, millis() > next_upload_time);
+
         if(WiFi.status() != WL_CONNECTED){
             // This can block the thread trying to connect to WiFi, so if WiFi is not connect, DHT22 won't blink.
             connect_and_login();
@@ -158,13 +178,22 @@ static int thdUploadData(struct pt *pt) {
 #if DEBUG_ENABLE_SERIAL
             Serial.println("Channel update successful.");
 #endif
-            next_update_interval = 20000;  // success, perform next upload after 20s
+            next_upload_time += UPLOAD_INTERVAL;  // success, perform next upload after UPLOAD_INTERVAL
+
+            dht22_next_sample_time = next_upload_time - DHT22_PRE_START_TIME;  // control DHT22 by setting next update sample time
+
+            PMS7003::set_enabled(false);  // control PMS7003 by setting enabled
+
+#if DEBUG_ENABLE_SERIAL
+            Serial.println("PMS7003 disabled.");
+            Serial.println("DHT22 next sample time extended.");
+#endif
         }
         else{
 #if DEBUG_ENABLE_SERIAL
             Serial.println("Problem updating channel. HTTP error code " + String(x));
 #endif
-            next_update_interval = 2000;  // failed, retry after 2s
+            next_upload_time += UPLOAD_RETRY_INTERVAL;  // failed, retry after UPLOAD_RETRY_INTERVAL
         }
     }
     PT_END(pt);
@@ -195,8 +224,8 @@ void setup() {
     PMS7003::begin();
 
     // Initialize threads
-    PT_INIT(&ptUpdatePMS7003);
-    PT_INIT(&ptUpdateSensors);
+    PT_INIT(&ptPMS7003Interupt);
+    PT_INIT(&ptUpdateDHT22);
 #if !DEBUG_LOCAL_WORK
     PT_INIT(&ptUploadData);
 #endif
@@ -204,8 +233,8 @@ void setup() {
 
 void loop()
 {
-    thdUpdatePMS7003(&ptUpdatePMS7003);
-    thdUpdateSensors(&ptUpdateSensors);
+    thdPMS7003Interupt(&ptPMS7003Interupt);
+    thdUpdateDHT22(&ptUpdateDHT22);
 #if !DEBUG_LOCAL_WORK
     thdUploadData(&ptUploadData);
 #endif
