@@ -4,7 +4,15 @@
  * @default 0
  * @note if the dev board is not connect to PC, this may cause block in serial print.
  */
-#define DEBUG_ENABLE_SERIAL 1
+#define DEBUG_ENABLE_SERIAL 0
+
+#if DEBUG_ENABLE_SERIAL
+#define SERIAL_PRINTLN(s) Serial.println(s)
+#define SERIAL_PRINTF(...) Serial.printf(__VA_ARGS__);
+#else
+#define SERIAL_PRINTLN(s)
+#define SERIAL_PRINTF(...)
+#endif
 
 /**
  * DEBUG_LOCAL_WORK
@@ -15,18 +23,21 @@
  */
 #define DEBUG_LOCAL_WORK 0
 
+
+
 #define WIFI_RETRY_INTERVAL 5000 // ms
-#define UPLOAD_INTERVAL 20000 // ms
+#define UPLOAD_INTERVAL 60000 // ms
 #define UPLOAD_RETRY_INTERVAL 2000 // ms
 #define PMS7003_PRE_START_TIME 5000 //ms
 #define DHT22_PRE_START_TIME 10000 //ms
-#define DHT22_INTERVAL 2000 //ms
+#define DHT22_INTERVAL 2500 //ms
 #define DHT22_RETRY_INTERVAL 1000 //ms
+
 
 #include "Config.h"
 
 #include "PMS7003.h"
-#include "DHT22_Adafruit.h"
+#include "DHT22.h"
 
 #if !DEBUG_LOCAL_WORK
 #include <WiFi.h>
@@ -43,22 +54,16 @@ HTTPClient httpClient;
 
 void connect_and_login() {
 
-#if DEBUG_ENABLE_SERIAL
-    Serial.println("Attempting to connect to WiFi");
-#endif
+    SERIAL_PRINTLN("Attempting to connect to WiFi");
 
     while(WiFi.status() != WL_CONNECTED){
         WiFi.begin(WIFI_SSID, WIFI_PASS);  // Connect to WPA/WPA2 network
-#if DEBUG_ENABLE_SERIAL
-        Serial.print(".");
-#endif
+        SERIAL_PRINTF(".");
         delay(WIFI_RETRY_INTERVAL);     
     } 
 
-#if DEBUG_ENABLE_SERIAL
-    Serial.println("WiFi Connected");
-    Serial.println("Attempting to login to ZJUWLAN");
-#endif
+    SERIAL_PRINTLN("WiFi Connected");
+    SERIAL_PRINTLN("Attempting to login to ZJUWLAN");
 
     httpClient.begin("http://10.105.1.35:802/include/auth_action.php");
     httpClient.addHeader ("Content-Type", "application/x-www-form-urlencoded");
@@ -73,14 +78,12 @@ void connect_and_login() {
                                    "&password=" WIFI_ZJUWLAN_PASS 
                                    "&ac_id=12&user_ip=&nas_ip=&user_mac=&save_me=0&ajax=1");
 
-#if DEBUG_ENABLE_SERIAL
     if(httpCode == HTTP_CODE_OK) {
         String payload = httpClient.getString();
-        Serial.println("ZJUWLAN login succeeded.");
+        SERIAL_PRINTLN("ZJUWLAN login succeeded.");
     } else {
-        Serial.printf("ZJUWLAN login failed, error: %s\n", httpClient.errorToString(httpCode).c_str());
+        SERIAL_PRINTF("ZJUWLAN login failed, error: %s\n", httpClient.errorToString(httpCode).c_str());
     }
-#endif
     httpClient.end();
 }
 
@@ -104,10 +107,8 @@ static int thdPMS7003Interupt(struct pt *pt) {
         // Wait until the information is fully received, which is the only condition.
         PT_WAIT_UNTIL(pt, PMS7003::data_available());
         PMS7003::update();
-#if DEBUG_ENABLE_SERIAL
-            Serial.printf("PMS7003: PM1.0: %u, PM2.5: %u, PM10: %u", PMS7003::pm1_0_amb, PMS7003::pm2_5_amb, PMS7003::pm10_0_amb);
-            Serial.println("");
-#endif
+        SERIAL_PRINTF("    PMS7003: PM1.0: %u, PM2.5: %u, PM10: %u", PMS7003::pm1_0_amb, PMS7003::pm2_5_amb, PMS7003::pm10_0_amb);
+        SERIAL_PRINTLN("");
     }
     PT_END(pt);
 }
@@ -124,15 +125,15 @@ static int thdUpdateDHT22(struct pt *pt) {
         PT_WAIT_UNTIL(pt, (millis() > dht22_next_sample_time));
 
         if (DHT22_Sensor::update()) {
-#if DEBUG_ENABLE_SERIAL
-            Serial.printf("DHT22: temperature: %f, humidity: %f", DHT22_Sensor::temperature, DHT22_Sensor::humidity);
-            Serial.println("");
-#endif
+
+            SERIAL_PRINTF("    DHT22: temperature: %f, humidity: %f", DHT22_Sensor::temperature, DHT22_Sensor::humidity);
+            SERIAL_PRINTLN("");
+
             dht22_next_sample_time = millis() + DHT22_INTERVAL;  // success, perform next sample after DHT22_INTERVAL
         } else {
-            #if DEBUG_ENABLE_SERIAL
-            Serial.println("DHT22 sample failed");
-#endif
+
+            SERIAL_PRINTLN("    DHT22 sample failed");
+
             dht22_next_sample_time = millis() + DHT22_RETRY_INTERVAL;  // failed, retry after 1s
         }
 
@@ -153,9 +154,9 @@ static int thdUploadData(struct pt *pt) {
             // If PMS7003 is not enabled, enable it ahead
             PT_WAIT_UNTIL(pt, millis() > next_upload_time - PMS7003_PRE_START_TIME);
             PMS7003::set_enabled(true);
-#if DEBUG_ENABLE_SERIAL
-            Serial.println("PMS7003 enabled.");
-#endif
+
+            SERIAL_PRINTLN("PMS7003 enabled.");
+
             // Continue to wait for real upload time
         }
 
@@ -175,24 +176,24 @@ static int thdUploadData(struct pt *pt) {
         int x = ThingSpeak.writeFields(THINGSPEAK_CH_ID, THINGSPEAK_WRITE_APIKEY);
 
         if(x == 200){
-#if DEBUG_ENABLE_SERIAL
-            Serial.println("Channel update successful.");
-#endif
+
+            SERIAL_PRINTLN("Channel update successful.");
+
             next_upload_time += UPLOAD_INTERVAL;  // success, perform next upload after UPLOAD_INTERVAL
 
             dht22_next_sample_time = next_upload_time - DHT22_PRE_START_TIME;  // control DHT22 by setting next update sample time
 
             PMS7003::set_enabled(false);  // control PMS7003 by setting enabled
 
-#if DEBUG_ENABLE_SERIAL
-            Serial.println("PMS7003 disabled.");
-            Serial.println("DHT22 next sample time extended.");
-#endif
+
+            SERIAL_PRINTLN("PMS7003 disabled.");
+            SERIAL_PRINTLN("DHT22 next sample time extended.");
+
         }
         else{
-#if DEBUG_ENABLE_SERIAL
-            Serial.println("Problem updating channel. HTTP error code " + String(x));
-#endif
+
+            SERIAL_PRINTLN("Problem updating channel. HTTP error code " + String(x));
+
             next_upload_time += UPLOAD_RETRY_INTERVAL;  // failed, retry after UPLOAD_RETRY_INTERVAL
         }
     }
@@ -222,6 +223,7 @@ void setup() {
 
     // Initialize sensors
     PMS7003::begin();
+    DHT22_Sensor::start();
 
     // Initialize threads
     PT_INIT(&ptPMS7003Interupt);
